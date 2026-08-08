@@ -1,7 +1,7 @@
 import math
 import datetime
 
-from feasibility.models import Client, CreditorRules, Offer
+from feasibility.models import Client, CreditorRules, LedgerEntry, Offer
 from feasibility.engine import Result, ScheduleRow
 
 
@@ -81,10 +81,11 @@ def evaluate_offer_pipeline(
     k_max = min(rules.max_terms, rules.max_payments)
     cadence_dates = get_cadence_dates(offer, k_max)
 
-    date_to_draft_map = {}
+    date_to_draft_map: dict[datetime.date, list[LedgerEntry]] = {}
 
     for draft in client.ledger:
-        date_to_draft_map[draft.date] = draft
+        date_to_draft_map.setdefault(draft.date, [])
+        date_to_draft_map[draft.date].append(draft)
 
     movement_days = cadence_dates + list(date_to_draft_map.keys())
     movement_days = sorted(movement_days)
@@ -95,7 +96,17 @@ def evaluate_offer_pipeline(
         creditor_payments = calculate_even_pay_payments(total_offer, k_max)
         pay_shape_used = "even"
     elif rules.is_ballooning_allowed:
-        pass
+        pay_shape_used = "balloon"
+        token_used = rules.max_token_pays - 1
+        creditor_payments = [rules.min_payment_cents] * token_used
+
+        remaining_k = k_max - token_used
+        amount_rem_to_creditor = total_offer - sum(creditor_payments)
+
+        remaining_payments = calculate_even_pay_payments(
+            amount_rem_to_creditor, remaining_k
+        )
+        creditor_payments += remaining_payments
     else:
         pay_shape_used = "staircase"
         if rules.max_segments >= 2:
@@ -144,9 +155,24 @@ def evaluate_offer_pipeline(
                 )
             )
         elif date in date_to_draft_map:
-            draft = date_to_draft_map[date]
-            current_escor_balance += draft.amount_cents
-            print(f"Credited {draft.amount_cents}. Total: {current_escor_balance}")
+            drafts = date_to_draft_map[date]
+            drafts = sorted(
+                drafts,
+                key=lambda x: int(x.type == "credit"),
+                reverse=True,
+            )
+
+            for draft in drafts:
+                if draft.type == "credit":
+                    current_escor_balance += draft.amount_cents
+                    print(
+                        f"Credited {draft.amount_cents}. Total: {current_escor_balance}"
+                    )
+                elif draft.type == "debit":
+                    current_escor_balance -= draft.amount_cents
+                    print(
+                        f"Debited {draft.amount_cents}. Total: {current_escor_balance}"
+                    )
 
     result = Result(feasible=True, schedule=rows, pay_shape_used=pay_shape_used)
     return result
