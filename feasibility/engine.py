@@ -69,6 +69,7 @@ class Result:
         if self.additional_funds is None:
             out["additional_funds"] = None
         else:
+
             def opt(o: FundsOption) -> dict:
                 d = {
                     "amount_cents": o.amount_cents,
@@ -95,4 +96,6 @@ def evaluate_offer(client: Client, offer: Offer, rules: CreditorRules) -> Result
     feasible=False with additional_funds (minimum lump sum AND minimum monthly
     increment) when it does not.
     """
-    raise NotImplementedError("Implement evaluate_offer — see ASSIGNMENT.md")
+    from feasibility.algo import evaluate_offer_pipeline
+
+    return evaluate_offer_pipeline(client, offer, rules)
