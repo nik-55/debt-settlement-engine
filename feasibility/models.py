@@ -71,6 +71,7 @@ class CreditorRules:
 # Date helpers
 # ---------------------------------------------------------------------------
 
+
 def end_of_month(d: date) -> date:
     return date(d.year, d.month, monthrange(d.year, d.month)[1])
 
@@ -114,6 +115,7 @@ def monthly_payment_dates(start: date, count: int) -> list[date]:
 # Loaders
 # ---------------------------------------------------------------------------
 
+
 def _d(s: str) -> date:
     return date.fromisoformat(s)
 
@@ -153,7 +155,9 @@ def load_creditor_rules(path: str | Path) -> CreditorRules:
         max_payments=int(raw["max_payments"]),
         min_payment_cents=int(raw["min_payment_cents"]),
         max_token_pays=int(raw["max_token_pays"]),
-        min_payment_tiers=[(int(a), int(b)) for a, b in raw.get("min_payment_tiers", [])],
+        min_payment_tiers=[
+            (int(a), int(b)) for a, b in raw.get("min_payment_tiers", [])
+        ],
         even_pays=bool(raw.get("even_pays", False)),
         is_ballooning_allowed=bool(raw.get("is_ballooning_allowed", False)),
         max_segments=int(raw.get("max_segments", 4)),
