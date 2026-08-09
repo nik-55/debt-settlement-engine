@@ -73,16 +73,33 @@ def validate_payments(
     min_payment_cents: int,
     max_token_pays: int,
     total_offer: int,
+    min_payment_tiers: list[tuple[int, int]],
+    pay_shape: str,
+    max_segments: int,
 ):
     remaining_max_token_pays = max_token_pays
     last_pay = None
-    for pay in creditor_payments:
+
+    active_tier_index = -1
+
+    unique_pays = set()
+
+    for i, pay in enumerate(creditor_payments):
+        unique_pays.add(pay)
         if pay == min_payment_cents:
             if remaining_max_token_pays > 0:
                 remaining_max_token_pays -= 1
             else:
                 return False
         if pay < min_payment_cents:
+            return False
+
+        if len(min_payment_tiers) > (active_tier_index + 1) and min_payment_tiers[
+            active_tier_index + 1
+        ][0] <= (i + 1):
+            active_tier_index += 1
+
+        if active_tier_index != -1 and min_payment_tiers[active_tier_index][1] > pay:
             return False
 
         if last_pay is not None and (last_pay > pay):
@@ -92,6 +109,10 @@ def validate_payments(
 
     if sum(creditor_payments) != total_offer:
         return False
+
+    if pay_shape == "staircase":
+        if len(unique_pays) > max_segments:
+            return False
 
     return True
 
@@ -113,6 +134,9 @@ def calculate_creditor_payments(
             rules.min_payment_cents,
             rules.max_token_pays,
             total_offer,
+            rules.min_payment_tiers,
+            pay_shape,
+            rules.max_segments,
         ):
             return []
 
@@ -124,8 +148,17 @@ def calculate_creditor_payments(
         remaining_max_token_pays = rules.max_token_pays
         remaining_creditor_amount = total_offer
 
+        active_index_tier = -1
+
         for i in range(k - 1):
-            if remaining_max_token_pays > 0:
+            if len(rules.min_payment_tiers) > (
+                active_index_tier + 1
+            ) and rules.min_payment_tiers[active_index_tier + 1][0] <= (i + 1):
+                active_index_tier += 1
+
+            if active_index_tier != -1:
+                min_payment_cents = rules.min_payment_tiers[active_index_tier][1]
+            elif remaining_max_token_pays > 0:
                 min_payment_cents = rules.min_payment_cents
                 remaining_max_token_pays -= 1
             else:
@@ -146,13 +179,31 @@ def calculate_creditor_payments(
             rules.min_payment_cents,
             rules.max_token_pays,
             total_offer,
+            rules.min_payment_tiers,
+            pay_shape,
+            rules.max_segments,
         ):
             return []
 
         return creditor_payments
     elif pay_shape == "staircase":
         if rules.max_segments == 1:
-            return calculate_creditor_payments(k, "even", total_offer, rules)
+            creditor_payments = calculate_creditor_payments(
+                k, "even", total_offer, rules
+            )
+
+            if not validate_payments(
+                creditor_payments,
+                rules.min_payment_cents,
+                rules.max_token_pays,
+                total_offer,
+                rules.min_payment_tiers,
+                pay_shape,
+                rules.max_segments,
+            ):
+                return []
+
+            return creditor_payments
         else:
             m_max = max(0, min(k - 2, rules.max_token_pays))
 
@@ -160,11 +211,22 @@ def calculate_creditor_payments(
                 creditor_payments = []
 
                 remaining_creditor_amount = total_offer
+                active_index_tier = -1
 
                 for i in range(m):
-                    amount_to_paid = min(
-                        rules.min_payment_cents, remaining_creditor_amount
-                    )
+                    if len(rules.min_payment_tiers) > (
+                        active_index_tier + 1
+                    ) and rules.min_payment_tiers[active_index_tier + 1][0] <= (i + 1):
+                        active_index_tier += 1
+
+                    min_payment_cents = rules.min_payment_cents
+
+                    if active_index_tier != -1:
+                        min_payment_cents = rules.min_payment_tiers[active_index_tier][
+                            1
+                        ]
+
+                    amount_to_paid = min(min_payment_cents, remaining_creditor_amount)
                     creditor_payments.append(amount_to_paid)
                     remaining_creditor_amount -= amount_to_paid
 
@@ -182,6 +244,27 @@ def calculate_creditor_payments(
                     if remaining_cents > 0:
                         continue
 
+                    minimum_base_amount = 0
+
+                    for i in range(len(creditor_payments), k):
+                        if len(rules.min_payment_tiers) > (
+                            active_index_tier + 1
+                        ) and rules.min_payment_tiers[active_index_tier + 1][0] <= (
+                            i + 1
+                        ):
+                            active_index_tier += 1
+
+                        if active_index_tier != -1:
+                            minimum_base_amount = max(
+                                minimum_base_amount,
+                                rules.min_payment_tiers[active_index_tier][1],
+                            )
+
+                    if (
+                        base_amount < minimum_base_amount
+                    ) or base_amount < rules.min_payment_cents:
+                        continue
+
                     creditor_payments += [base_amount] * k_second_segment
 
                 if not validate_payments(
@@ -189,6 +272,9 @@ def calculate_creditor_payments(
                     rules.min_payment_cents,
                     rules.max_token_pays,
                     total_offer,
+                    rules.min_payment_tiers,
+                    pay_shape,
+                    rules.max_segments,
                 ):
                     continue
 
@@ -239,6 +325,9 @@ def simulate_movement_days(
                         f"[CREDIT] {draft.amount_cents}. Total: {current_escor_balance}"
                     )
                 elif draft.type == "debit":
+                    if (current_escor_balance - draft.amount_cents) < 0:
+                        return []
+
                     current_escor_balance -= draft.amount_cents
                     logger.debug(
                         f"[DEBIT] {draft.amount_cents}. Total: {current_escor_balance}"
@@ -542,7 +631,7 @@ def evaluate_offer_pipeline(
             ),
         )
 
-    if None not in [lump_fund_option, increment_fund_option]:
+    if lump_fund_option is not None or increment_fund_option is not None:
         return Result(
             feasible=False,
             additional_funds=AdditionalFunds(
