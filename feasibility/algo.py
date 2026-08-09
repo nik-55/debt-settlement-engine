@@ -57,20 +57,6 @@ def get_cadence_date_range(first_payment_date: datetime.date, num_of_months: int
     return cadence_dates
 
 
-def calculate_even_pay_payments(total_offer: int, k: int):
-    base_amount = total_offer // k
-    remaining_cents = total_offer % k
-
-    creditor_payments = [base_amount] * k
-
-    for i in range(remaining_cents):
-        creditor_payments[k - 1 - i] += 1
-
-    print(f"Creditor payments: {creditor_payments}")
-
-    return creditor_payments
-
-
 def get_default_first_payment_date(first_draft_date: datetime.date) -> datetime.date:
     year = first_draft_date.year
     month = first_draft_date.month
@@ -219,6 +205,94 @@ def calculate_creditor_payments(
             return creditor_payments
 
 
+def simulate_movement_days(
+    k: int,
+    pay_shape_used: str,
+    total_offer: int,
+    rules: CreditorRules,
+    cadence_dates: list[datetime.date],
+    client: Client,
+    program_fee: int,
+    movement_days: list[int],
+    date_to_draft_map: dict,
+):
+    creditor_payments = calculate_creditor_payments(
+        k, pay_shape_used, total_offer, rules
+    )
+
+    if not creditor_payments:
+        return []
+
+    date_to_creditor_amount_map = {
+        cadence_dates[i]: payment for i, payment in enumerate(creditor_payments)
+    }
+
+    current_escor_balance = client.current_balance_cents
+    program_fee_remaining = program_fee
+
+    rows = []
+    for date in movement_days:
+        if date in date_to_draft_map:
+            drafts = date_to_draft_map[date]
+            drafts = sorted(
+                drafts,
+                key=lambda x: int(x.type == "credit"),
+                reverse=True,
+            )
+
+            for draft in drafts:
+                if draft.type == "credit":
+                    current_escor_balance += draft.amount_cents
+                    print(
+                        f"[CREDIT] {draft.amount_cents}. Total: {current_escor_balance}"
+                    )
+                elif draft.type == "debit":
+                    current_escor_balance -= draft.amount_cents
+                    print(
+                        f"[DEBIT] {draft.amount_cents}. Total: {current_escor_balance}"
+                    )
+
+        if date in cadence_dates:
+            amount_to_creditor = (
+                date_to_creditor_amount_map[date]
+                if date in date_to_creditor_amount_map
+                else 0
+            )
+            bank_fee = 0
+            if amount_to_creditor > 0:
+                bank_fee = rules.bank_fee_cents
+
+            remaining_amount = current_escor_balance - (amount_to_creditor + bank_fee)
+
+            if remaining_amount < 0:
+                return []
+
+            program_fee_part = min(remaining_amount, program_fee_remaining)
+            program_fee_remaining -= program_fee_part
+
+            current_escor_balance -= amount_to_creditor + bank_fee + program_fee_part
+
+            print(
+                f"[DEBIT]: Creditor {amount_to_creditor} Bank fee: {bank_fee} program_fee_part: {program_fee_part}"
+            )
+
+            if amount_to_creditor != 0 or program_fee_part != 0:
+                rows.append(
+                    ScheduleRow(
+                        date=date,
+                        creditor_payment_cents=amount_to_creditor,
+                        program_fee_cents=program_fee_part,
+                        bank_fee_cents=bank_fee,
+                        balance_cents=current_escor_balance,
+                    )
+                )
+
+    if program_fee_remaining != 0:
+        return []
+
+    return rows
+
+
 def evaluate_offer_pipeline(
     client: Client, offer: Offer, rules: CreditorRules
 ) -> Result:
@@ -260,87 +334,28 @@ def evaluate_offer_pipeline(
         )
 
     if rules.even_pays:
-        creditor_payments = calculate_even_pay_payments(total_offer, k_max)
         pay_shape_used = "even"
     elif rules.is_ballooning_allowed:
         pay_shape_used = "balloon"
-        token_used = rules.max_token_pays - 1
-        creditor_payments = [rules.min_payment_cents] * token_used
-
-        remaining_k = k_max - token_used
-        amount_rem_to_creditor = total_offer - sum(creditor_payments)
-
-        remaining_payments = calculate_even_pay_payments(
-            amount_rem_to_creditor, remaining_k
-        )
-        creditor_payments += remaining_payments
     else:
         pay_shape_used = "staircase"
-        if rules.max_segments >= 2:
-            creditor_payments = [rules.min_payment_cents] * rules.max_token_pays
 
-            remaining_k = k_max - rules.max_token_pays
-            amount_rem_to_creditor = total_offer - sum(creditor_payments)
+    for k in range(k_max, 0, -1):
+        schedule = simulate_movement_days(
+            k=k,
+            pay_shape_used=pay_shape_used,
+            total_offer=total_offer,
+            rules=rules,
+            cadence_dates=cadence_dates,
+            client=client,
+            program_fee=program_fee,
+            movement_days=movement_days,
+            date_to_draft_map=date_to_draft_map,
+        )
 
-            remaining_payments = calculate_even_pay_payments(
-                amount_rem_to_creditor, remaining_k
-            )
-            creditor_payments += remaining_payments
-
-    date_to_creditor_amount_map = {
-        cadence_dates[i]: payment for i, payment in enumerate(creditor_payments)
-    }
-
-    current_escor_balance = client.current_balance_cents
-    program_fee_remaining = program_fee
-
-    rows = []
-    for date in movement_days:
-        if date in date_to_creditor_amount_map:
-            amount_to_creditor = date_to_creditor_amount_map[date]
-            bank_fee = 0
-            if amount_to_creditor > 0:
-                bank_fee = rules.bank_fee_cents
-
-            remaining_amount = current_escor_balance - (amount_to_creditor + bank_fee)
-
-            p_fee = min(remaining_amount, program_fee_remaining)
-            program_fee_remaining -= p_fee
-
-            current_escor_balance -= amount_to_creditor + bank_fee + p_fee
-
-            print(
-                f"Debited: Creditor {amount_to_creditor} Bank fee: {bank_fee} p_fee: {p_fee}"
-            )
-            rows.append(
-                ScheduleRow(
-                    date=date,
-                    creditor_payment_cents=amount_to_creditor,
-                    program_fee_cents=p_fee,
-                    bank_fee_cents=bank_fee,
-                    balance_cents=current_escor_balance,
-                )
+        if schedule:
+            return Result(
+                feasible=True, schedule=schedule, pay_shape_used=pay_shape_used
             )
 
-        if date in date_to_draft_map:
-            drafts = date_to_draft_map[date]
-            drafts = sorted(
-                drafts,
-                key=lambda x: int(x.type == "credit"),
-                reverse=True,
-            )
-
-            for draft in drafts:
-                if draft.type == "credit":
-                    current_escor_balance += draft.amount_cents
-                    print(
-                        f"Credited {draft.amount_cents}. Total: {current_escor_balance}"
-                    )
-                elif draft.type == "debit":
-                    current_escor_balance -= draft.amount_cents
-                    print(
-                        f"Debited {draft.amount_cents}. Total: {current_escor_balance}"
-                    )
-
-    result = Result(feasible=True, schedule=rows, pay_shape_used=pay_shape_used)
-    return result
+    return Result(feasible=False, additional_funds=None)
