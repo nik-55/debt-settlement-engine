@@ -1,8 +1,12 @@
+import logging
 import math
 import datetime
 
 from feasibility.models import Client, CreditorRules, LedgerEntry, Offer
 from feasibility.engine import Result, ScheduleRow, AdditionalFunds, FundsOption
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 
 def round_half_up(x: float | int):
@@ -243,12 +247,12 @@ def simulate_movement_days(
             for draft in drafts:
                 if draft.type == "credit":
                     current_escor_balance += draft.amount_cents
-                    print(
+                    logger.debug(
                         f"[CREDIT] {draft.amount_cents}. Total: {current_escor_balance}"
                     )
                 elif draft.type == "debit":
                     current_escor_balance -= draft.amount_cents
-                    print(
+                    logger.debug(
                         f"[DEBIT] {draft.amount_cents}. Total: {current_escor_balance}"
                     )
 
@@ -272,7 +276,7 @@ def simulate_movement_days(
 
             current_escor_balance -= amount_to_creditor + bank_fee + program_fee_part
 
-            print(
+            logger.debug(
                 f"[DEBIT]: Creditor {amount_to_creditor} Bank fee: {bank_fee} program_fee_part: {program_fee_part}"
             )
 
@@ -293,31 +297,19 @@ def simulate_movement_days(
     return rows
 
 
-def evaluate_offer_pipeline(
-    client: Client, offer: Offer, rules: CreditorRules
-) -> Result:
-    total_offer = round_half_up(offer.current_balance_cents * offer.settlement_pct)
-    program_fee = round_half_up(offer.original_balance_cents * rules.program_fee_pct)
-
-    k_max = min(rules.max_terms, rules.max_payments)
-    horizon_date = client.last_draft_date
-    first_payment_date = offer.first_payment_date or get_default_first_payment_date(
-        client.first_draft_date
-    )
-
-    print(
-        f"Total Offer: {total_offer}, Program Fee: {program_fee}, horizon: {horizon_date}"
-    )
-
-    cadence_dates = get_cadence_date_range(first_payment_date, k_max)
-    cadence_dates = [c for c in cadence_dates if c <= horizon_date]
-    k_max = len(cadence_dates)
-
-    print(f"k_max: {k_max}")
-
+def loop_over_k(
+    k_max: int,
+    pay_shape_used: str,
+    total_offer: int,
+    rules: CreditorRules,
+    cadence_dates: list[datetime.date],
+    client: Client,
+    program_fee: int,
+    ledger: list[LedgerEntry],
+):
     date_to_draft_map: dict[datetime.date, list[LedgerEntry]] = {}
 
-    for draft in client.ledger:
+    for draft in ledger:
         if draft.date > client.as_of_date:
             date_to_draft_map.setdefault(draft.date, [])
             date_to_draft_map[draft.date].append(draft)
@@ -325,20 +317,7 @@ def evaluate_offer_pipeline(
     movement_days = cadence_dates + list(date_to_draft_map.keys())
     movement_days = list(sorted(set(movement_days)))
 
-    print(f"Movement days: {movement_days}")
-
-    if k_max == 0:
-        return Result(
-            feasible=False,
-            additional_funds=None,
-        )
-
-    if rules.even_pays:
-        pay_shape_used = "even"
-    elif rules.is_ballooning_allowed:
-        pay_shape_used = "balloon"
-    else:
-        pay_shape_used = "staircase"
+    logger.debug(f"Movement days: {movement_days}")
 
     for k in range(k_max, 0, -1):
         schedule = simulate_movement_days(
@@ -354,8 +333,237 @@ def evaluate_offer_pipeline(
         )
 
         if schedule:
-            return Result(
-                feasible=True, schedule=schedule, pay_shape_used=pay_shape_used
-            )
+            return schedule
 
-    return Result(feasible=False, additional_funds=None)
+    return []
+
+
+def minimum_lump_finder(
+    k_max: int,
+    pay_shape_used: str,
+    total_offer: int,
+    rules: CreditorRules,
+    cadence_dates: list[datetime.date],
+    client: Client,
+    program_fee: int,
+    bank_fee_cents: int,
+):
+    lump_date = client.as_of_date + datetime.timedelta(days=1)
+
+    low = 0
+    high = total_offer + program_fee + k_max * bank_fee_cents
+
+    ans = None
+
+    while low <= high:
+        mid = (low + high) // 2
+        schedule = loop_over_k(
+            k_max=k_max,
+            pay_shape_used=pay_shape_used,
+            total_offer=total_offer,
+            rules=rules,
+            cadence_dates=cadence_dates,
+            client=client,
+            program_fee=program_fee,
+            ledger=client.ledger + [LedgerEntry(lump_date, mid, "credit")],
+        )
+
+        if schedule:
+            ans = mid, lump_date
+            high = mid - 1
+        else:
+            low = mid + 1
+
+    if ans is not None:
+        return ans
+
+    return None
+
+
+def get_modified_ledger(client: Client, x: int):
+    modified_ledger = []
+    num_futures = 0
+
+    for l in client.ledger:
+        if l.date > client.as_of_date and l.type == "credit":
+            amount_cents = l.amount_cents + x
+            num_futures += 1
+        else:
+            amount_cents = l.amount_cents
+
+        modified_ledger.append(
+            LedgerEntry(
+                date=l.date,
+                amount_cents=amount_cents,
+                type=l.type,
+            )
+        )
+
+    return modified_ledger, num_futures
+
+
+def minimum_increment_finder(
+    k_max: int,
+    pay_shape_used: str,
+    total_offer: int,
+    rules: CreditorRules,
+    cadence_dates: list[datetime.date],
+    client: Client,
+    program_fee: int,
+    bank_fee_cents: int,
+):
+    low = 0
+    high = total_offer + program_fee + k_max * bank_fee_cents
+
+    ans = None
+
+    while low <= high:
+        mid = (low + high) // 2
+
+        modified_ledger, num_futures = get_modified_ledger(
+            client=client,
+            x=mid,
+        )
+
+        schedule = loop_over_k(
+            k_max=k_max,
+            pay_shape_used=pay_shape_used,
+            total_offer=total_offer,
+            rules=rules,
+            cadence_dates=cadence_dates,
+            client=client,
+            program_fee=program_fee,
+            ledger=modified_ledger,
+        )
+
+        if schedule:
+            ans = mid, num_futures
+            high = mid - 1
+        else:
+            low = mid + 1
+
+    if ans is not None:
+        return ans
+
+    return None
+
+
+def evaluate_offer_pipeline(
+    client: Client, offer: Offer, rules: CreditorRules
+) -> Result:
+    total_offer = round_half_up(offer.current_balance_cents * offer.settlement_pct)
+    program_fee = round_half_up(offer.original_balance_cents * rules.program_fee_pct)
+
+    k_max = min(rules.max_terms, rules.max_payments)
+    horizon_date = client.last_draft_date
+    first_payment_date = offer.first_payment_date or get_default_first_payment_date(
+        client.first_draft_date
+    )
+
+    logger.info(
+        f"Total Offer: {total_offer}, Program Fee: {program_fee}, horizon: {horizon_date}"
+    )
+
+    cadence_dates = get_cadence_date_range(first_payment_date, k_max)
+    cadence_dates = [c for c in cadence_dates if c <= horizon_date]
+    k_max = len(cadence_dates)
+
+    logger.info(f"k_max: {k_max}")
+
+    if k_max == 0:
+        return Result(
+            feasible=False,
+            additional_funds=None,
+        )
+
+    if rules.even_pays:
+        pay_shape_used = "even"
+    elif rules.is_ballooning_allowed:
+        pay_shape_used = "balloon"
+    else:
+        pay_shape_used = "staircase"
+
+    schedule = loop_over_k(
+        k_max=k_max,
+        pay_shape_used=pay_shape_used,
+        total_offer=total_offer,
+        rules=rules,
+        cadence_dates=cadence_dates,
+        client=client,
+        program_fee=program_fee,
+        ledger=client.ledger,
+    )
+
+    if schedule:
+        return Result(feasible=True, schedule=schedule, pay_shape_used=pay_shape_used)
+
+    lump_finder_output = minimum_lump_finder(
+        k_max=k_max,
+        pay_shape_used=pay_shape_used,
+        total_offer=total_offer,
+        rules=rules,
+        cadence_dates=cadence_dates,
+        client=client,
+        program_fee=program_fee,
+        bank_fee_cents=rules.bank_fee_cents,
+    )
+
+    lump_fund_option = None
+
+    if lump_finder_output is not None:
+        min_lump, lump_date = lump_finder_output
+        lump_cap = round_half_up(0.65 * total_offer)
+        within_guardrail = min_lump <= lump_cap
+        lump_fund_option = FundsOption(
+            amount_cents=min_lump,
+            date=lump_date,
+            within_guardrail=within_guardrail,
+            reason=(
+                f"Lump of {min_lump} is within the guardrail of {lump_cap} cents"
+                if within_guardrail
+                else f"Lump of {min_lump} exceeds the guardrail of {lump_cap} cents"
+            ),
+        )
+
+    increment_finder_output = minimum_increment_finder(
+        k_max=k_max,
+        pay_shape_used=pay_shape_used,
+        total_offer=total_offer,
+        rules=rules,
+        cadence_dates=cadence_dates,
+        client=client,
+        program_fee=program_fee,
+        bank_fee_cents=rules.bank_fee_cents,
+    )
+
+    increment_fund_option = None
+
+    if increment_finder_output is not None:
+        min_increment, num_futures = increment_finder_output
+        increment_cap = max(10_000, round_half_up(0.40 * client.draft_amount_cents))
+        within_guardrail = min_increment <= increment_cap
+
+        increment_fund_option = FundsOption(
+            amount_cents=min_increment,
+            within_guardrail=within_guardrail,
+            num_drafts=num_futures,
+            reason=(
+                f"Increment of {min_increment} is within {increment_cap} cents"
+                if within_guardrail
+                else f"Increment of {min_increment} exceeds {increment_cap} cents"
+            ),
+        )
+
+    if None not in [lump_fund_option, increment_fund_option]:
+        return Result(
+            feasible=False,
+            additional_funds=AdditionalFunds(
+                lump_sum=lump_fund_option,
+                monthly_increment=increment_fund_option,
+            ),
+        )
+
+    return Result(
+        feasible=False,
+        additional_funds=None,
+    )
