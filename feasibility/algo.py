@@ -159,7 +159,7 @@ def calculate_creditor_payments(
             remaining_max_token_pays = rules.max_token_pays
             remaining_creditor_amount = total_offer
 
-            for i in range(k):
+            for i in range(max(0, k - 2)):
                 if remaining_max_token_pays > 0:
                     min_payment_cents = rules.min_payment_cents
                     remaining_max_token_pays -= 1
@@ -172,18 +172,6 @@ def calculate_creditor_payments(
 
                 if remaining_creditor_amount == 0:
                     break
-
-            if rules.max_segments > 2:
-                next_index = len(creditor_payments)
-                min_payment_cents = rules.min_payment_cents + 1
-
-                for i in range(next_index, k - 1):
-                    amount_to_paid = min(min_payment_cents, remaining_creditor_amount)
-                    creditor_payments.append(amount_to_paid)
-                    remaining_creditor_amount -= amount_to_paid
-
-                    if remaining_creditor_amount == 0:
-                        break
 
             if remaining_creditor_amount > 0:
                 k_second_segment = k - len(creditor_payments)

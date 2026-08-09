@@ -1,61 +1,51 @@
-# Settlement Feasibility & Fee Engine — Take-home
+# Scheduling Engine
 
-Welcome, and thanks for taking the time. The full problem is in
-[`ASSIGNMENT.md`](./ASSIGNMENT.md). This README is just orientation.
+We have designed an engine that finds the schedule from the rules, offer and drafts given by the client. If no feasible schedule exists, we have to suggest the optimal extra payment that makes scheduling possible, either as a lump sum or as a monthly increment.
 
-## The task in one line
+When we say schedule, we mean the schedule of payments to the creditor.
 
-Given a client's escrow account, a settlement offer, and a creditor's rules,
-decide whether the offer is affordable (and schedule it, collecting our fee as
-early as allowed) or — if not — compute the minimum extra funding needed.
+There are three shapes given: Even, Balloon and Staircase.
 
-## Setup
+The core objective is to find the schedule that collects the program fee as early as possible.
 
-```bash
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-```
+## The core pipeline
 
-## Layout
+The core pipeline works as follows:
 
-```
-hiring_takehome/
-├── ASSIGNMENT.md            # full specification — read this
-├── feasibility/
-│   ├── models.py            # data models, JSON loaders, date/EOM helpers (provided)
-│   └── engine.py            # >>> implement evaluate_offer here <<< (+ Result shape)
-├── cases/                   # four example cases (client.json / offer.json / creditor_rules.json)
-│   ├── case1_feasible_even
-│   ├── case2_infeasible_minima
-│   ├── case3_balloon
-│   └── case4_tiers
-├── tests/
-│   ├── test_smoke.py        # scaffolding sanity tests (pass out of the box)
-│   └── test_cases.py        # example expectations — make these pass, then add your own
-├── run.py                   # python run.py cases/<case>
-└── requirements.txt
-```
+- We calculate the total offer to be paid to the creditor.
+- No payment to the program or creditor can be made once the horizon date has passed.
+- k is the number of times a payment is made, either to the creditor or just to the program. `1 <= k <= k_max`
+- We loop from k_max down to 1. Why reverse? Because a higher k indirectly implies that the payment to the creditor is distributed over more payments, and hence we collect the payment fee early.
+- For each k we simulate the movement of credits and debits. If a schedule is found we return it, otherwise we continue with a lower k.
 
-## Run
+## Inside Simulation (for a given k)
 
-```bash
-# evaluate a single case (prints the Result as JSON)
-python run.py cases/case1_feasible_even
+- We first calculate the creditor_payments vector, that is, the payments to be made to the creditor. This vector must obey the constraints: the sum must be total_offer, it must be non decreasing, and it must respect max_token_pays and minimum tiers.
+- Then we iterate over all movement_days.
 
-# tests
-pytest -q
-```
+For each day:
 
-Out of the box, `tests/test_smoke.py` passes and `tests/test_cases.py` fails —
-the latter is your target. Go beyond those four cases with your own tests.
+- We first check whether there is a credit from the client, and if so we increase the balance. If there is a debit from the client, we decrease the balance.
+- Then we check whether the day falls in cadence_dates. If it does, we take the amount to be paid to the creditor from the creditor_payments vector, and then greedily pay the program fee from the remaining amount. We record that day in the schedule along with how much goes to whom.
 
-## What to submit
+This gives us a list of scheduled days, and we end the simulation by returning the valid schedule for the given k.
 
-Your implementation, your tests, and a short README section describing:
-- your approach and the alternatives you considered,
-- **your interpretation of the payment shapes** (even / staircase / balloon — we
-  left these loosely defined on purpose),
-- assumptions you made, and known edge cases / limitations.
+## Inside calculate_creditor_payments
 
-Budget ~5–6 hours. Prefer a correct, well-tested core over breadth. When in
-doubt, write down your assumption and keep going.
+- If the shape is even, distribute the total offer equally over k, handling the remaining cents.
+- If the shape is balloon, fill the payment vector up to k-1 with min_payment_cents limited by max_token_pays, then start filling with min_payment_cents + 1 cents. The last payment in the vector takes all the remaining money.
+- If the shape is staircase and only one segment is allowed, then for k-2 it is almost the same as the even shape (a staircase requires at least two payments of the same amount, otherwise it becomes a balloon). If more segments are allowed, fill with min_payment_cents limited by max_token_pays, and then distribute the remaining payments evenly.
+
+## When the schedule is infeasible
+
+If there is no valid schedule and hence the schedule is infeasible, we have to find:
+
+- **Minimum lump amount:** the amount that can be credited on a given date so that a valid schedule does exist.
+  We assume the lump amount payment is made at `lump_date = as_of_date + 1`.
+  Low is the minimum lump amount, high is the maximum lump amount (equal to the entire payment required).
+  We do a binary search over low and high to find the minimum lump amount that, added as a new ledger entry at lump_date, makes a valid schedule. If it exists, we also check the guardrail condition on the minimum lump amount.
+
+- **Minimum increment amount:** how much can be added to future drafts so that a valid schedule is possible.
+  Low is the minimum lump amount, high is the maximum lump amount (equal to the entire payment required). We do a binary search over low and high to find the increment x to future drafts that makes a valid schedule possible. If it exists, we check the guardrail condition on minimum_increment over future drafts.
+
+We suggest minimum_lump_amount and minimum_increment_amount that make a valid schedule possible.
