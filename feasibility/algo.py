@@ -154,47 +154,47 @@ def calculate_creditor_payments(
         if rules.max_segments == 1:
             return calculate_creditor_payments(k, "even", total_offer, rules)
         else:
-            creditor_payments = []
+            m_max = max(0, min(k - 2, rules.max_token_pays))
 
-            remaining_max_token_pays = rules.max_token_pays
-            remaining_creditor_amount = total_offer
+            for m in range(m_max, -1, -1):
+                creditor_payments = []
 
-            for i in range(max(0, k - 2)):
-                if remaining_max_token_pays > 0:
-                    min_payment_cents = rules.min_payment_cents
-                    remaining_max_token_pays -= 1
-                else:
-                    break
+                remaining_creditor_amount = total_offer
 
-                amount_to_paid = min(min_payment_cents, remaining_creditor_amount)
-                creditor_payments.append(amount_to_paid)
-                remaining_creditor_amount -= amount_to_paid
+                for i in range(m):
+                    amount_to_paid = min(
+                        rules.min_payment_cents, remaining_creditor_amount
+                    )
+                    creditor_payments.append(amount_to_paid)
+                    remaining_creditor_amount -= amount_to_paid
 
-                if remaining_creditor_amount == 0:
-                    break
+                    if remaining_creditor_amount == 0:
+                        break
 
-            if remaining_creditor_amount > 0:
-                k_second_segment = k - len(creditor_payments)
-                if k_second_segment == 0:
-                    return []
+                if remaining_creditor_amount > 0:
+                    k_second_segment = k - len(creditor_payments)
+                    if k_second_segment == 0:
+                        continue
 
-                base_amount = remaining_creditor_amount // k_second_segment
-                remaining_cents = remaining_creditor_amount % k_second_segment
+                    base_amount = remaining_creditor_amount // k_second_segment
+                    remaining_cents = remaining_creditor_amount % k_second_segment
 
-                if remaining_cents > 0:
-                    return []
+                    if remaining_cents > 0:
+                        continue
 
-                creditor_payments += [base_amount] * k_second_segment
+                    creditor_payments += [base_amount] * k_second_segment
 
-            if not validate_payments(
-                creditor_payments,
-                rules.min_payment_cents,
-                rules.max_token_pays,
-                total_offer,
-            ):
-                return []
+                if not validate_payments(
+                    creditor_payments,
+                    rules.min_payment_cents,
+                    rules.max_token_pays,
+                    total_offer,
+                ):
+                    continue
 
-            return creditor_payments
+                return creditor_payments
+
+            return []
 
 
 def simulate_movement_days(
