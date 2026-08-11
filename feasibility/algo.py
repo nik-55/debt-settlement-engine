@@ -8,6 +8,7 @@ from feasibility.utils import (
     get_cadence_date_range,
     get_default_first_payment_date,
 )
+from feasibility.staircase import staircase_payments
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -149,7 +150,7 @@ def calculate_creditor_payments(
                 return []
 
             return creditor_payments
-        else:
+        elif False:
             m_max = max(0, min(k - 2, rules.max_token_pays))
 
             for m in range(m_max, -1, -1):
@@ -226,6 +227,8 @@ def calculate_creditor_payments(
                 return creditor_payments
 
             return []
+        else:
+            return staircase_payments(k, total_offer, rules)
 
 
 def simulate_movement_days(
